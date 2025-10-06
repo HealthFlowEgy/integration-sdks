@@ -1,0 +1,9 @@
+# HCX Integrator SDK - Core Dependencies
+# Production dependencies
+
+requests>=2.31.0
+urllib3>=2.0.0
+cryptography>=41.0.0
+python-jose[cryptography]>=3.3.0
+pydantic>=2.5.0
+python-dotenv>=1.0.0

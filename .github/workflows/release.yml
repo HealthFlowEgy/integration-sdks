@@ -1,0 +1,330 @@
+name: Release Management
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+      - 'nodejs-v*.*.*'
+      - 'python-v*.*.*'
+      - 'java-v*.*.*'
+      - 'dotnet-v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., 2.0.0)'
+        required: true
+      sdk:
+        description: 'SDK to release'
+        required: true
+        type: choice
+        options:
+          - all
+          - nodejs
+          - python
+          - java
+          - dotnet
+
+jobs:
+  prepare-release:
+    name: Prepare Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.extract-version.outputs.version }}
+      sdk: ${{ steps.extract-sdk.outputs.sdk }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version and SDK from tag
+        id: extract-version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            TAG=${GITHUB_REF#refs/tags/}
+            VERSION=${TAG#*-v}
+            VERSION=${VERSION#v}
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Extract SDK type
+        id: extract-sdk
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "sdk=${{ github.event.inputs.sdk }}" >> $GITHUB_OUTPUT
+          else
+            TAG=${GITHUB_REF#refs/tags/}
+            if [[ $TAG == nodejs-* ]]; then
+              echo "sdk=nodejs" >> $GITHUB_OUTPUT
+            elif [[ $TAG == python-* ]]; then
+              echo "sdk=python" >> $GITHUB_OUTPUT
+            elif [[ $TAG == java-* ]]; then
+              echo "sdk=java" >> $GITHUB_OUTPUT
+            elif [[ $TAG == dotnet-* ]]; then
+              echo "sdk=dotnet" >> $GITHUB_OUTPUT
+            else
+              echo "sdk=all" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Generate changelog
+        id: changelog
+        uses: metcalfc/changelog-generator@v4.1.0
+        with:
+          myToken: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload changelog
+        uses: actions/upload-artifact@v3
+        with:
+          name: changelog
+          path: CHANGELOG.md
+
+  release-nodejs:
+    name: Release Node.js SDK
+    runs-on: ubuntu-latest
+    needs: prepare-release
+    if: needs.prepare-release.outputs.sdk == 'nodejs' || needs.prepare-release.outputs.sdk == 'all'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Update version
+        working-directory: javascript
+        run: npm version ${{ needs.prepare-release.outputs.version }} --no-git-tag-version
+
+      - name: Install dependencies
+        working-directory: javascript
+        run: npm ci
+
+      - name: Build
+        working-directory: javascript
+        run: npm run build
+
+      - name: Run tests
+        working-directory: javascript
+        run: npm test
+
+      - name: Publish to npm
+        working-directory: javascript
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create package tarball
+        working-directory: javascript
+        run: npm pack
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: nodejs-package
+          path: javascript/*.tgz
+
+  release-python:
+    name: Release Python SDK
+    runs-on: ubuntu-latest
+    needs: prepare-release
+    if: needs.prepare-release.outputs.sdk == 'python' || needs.prepare-release.outputs.sdk == 'all'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Update version
+        working-directory: python/hcx-integrator
+        run: |
+          sed -i "s/VERSION = '.*'/VERSION = '${{ needs.prepare-release.outputs.version }}'/" setup.py
+
+      - name: Install build tools
+        run: pip install build twine
+
+      - name: Build package
+        working-directory: python/hcx-integrator
+        run: python -m build
+
+      - name: Check package
+        working-directory: python/hcx-integrator
+        run: twine check dist/*
+
+      - name: Publish to PyPI
+        working-directory: python/hcx-integrator
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+        run: twine upload dist/*
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: python-package
+          path: python/hcx-integrator/dist/*
+
+  release-java:
+    name: Release Java SDK
+    runs-on: ubuntu-latest
+    needs: prepare-release
+    if: needs.prepare-release.outputs.sdk == 'java' || needs.prepare-release.outputs.sdk == 'all'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 11
+        uses: actions/setup-java@v3
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+          cache: 'maven'
+          server-id: ossrh
+          server-username: MAVEN_USERNAME
+          server-password: MAVEN_PASSWORD
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase: MAVEN_GPG_PASSPHRASE
+
+      - name: Update version
+        working-directory: java/hcx-integrator-sdk
+        run: mvn versions:set -DnewVersion=${{ needs.prepare-release.outputs.version }}
+
+      - name: Build and test
+        working-directory: java/hcx-integrator-sdk
+        run: mvn clean verify
+
+      - name: Deploy to Maven Central
+        working-directory: java/hcx-integrator-sdk
+        env:
+          MAVEN_USERNAME: ${{ secrets.OSSRH_USERNAME }}
+          MAVEN_PASSWORD: ${{ secrets.OSSRH_TOKEN }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: mvn deploy -P release
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: java-package
+          path: java/hcx-integrator-sdk/target/*.jar
+
+  release-dotnet:
+    name: Release .NET SDK
+    runs-on: ubuntu-latest
+    needs: prepare-release
+    if: needs.prepare-release.outputs.sdk == 'dotnet' || needs.prepare-release.outputs.sdk == 'all'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: '7.0.x'
+
+      - name: Update version
+        working-directory: dot-net
+        run: |
+          find . -name "*.csproj" -exec sed -i "s/<Version>.*<\/Version>/<Version>${{ needs.prepare-release.outputs.version }}<\/Version>/" {} \;
+
+      - name: Restore dependencies
+        working-directory: dot-net
+        run: dotnet restore
+
+      - name: Build
+        working-directory: dot-net
+        run: dotnet build --configuration Release --no-restore
+
+      - name: Test
+        working-directory: dot-net
+        run: dotnet test --configuration Release --no-build
+
+      - name: Pack
+        working-directory: dot-net
+        run: dotnet pack --configuration Release --no-build --output ./nupkg
+
+      - name: Publish to NuGet
+        working-directory: dot-net
+        run: dotnet nuget push ./nupkg/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: dotnet-package
+          path: dot-net/nupkg/*.nupkg
+
+  create-github-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [prepare-release, release-nodejs, release-python, release-java, release-dotnet]
+    if: always() && needs.prepare-release.result == 'success'
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: release-artifacts
+
+      - name: Download changelog
+        uses: actions/download-artifact@v3
+        with:
+          name: changelog
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ needs.prepare-release.outputs.version }}
+          body_path: CHANGELOG.md
+          draft: false
+          prerelease: false
+          files: |
+            release-artifacts/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  notify-release:
+    name: Notify Release
+    runs-on: ubuntu-latest
+    needs: [prepare-release, create-github-release]
+    if: always()
+    steps:
+      - name: Send Slack notification
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          text: |
+            Release ${{ needs.prepare-release.outputs.version }} completed
+            SDK: ${{ needs.prepare-release.outputs.sdk }}
+            Status: ${{ job.status }}
+          webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+        if: always()
+
+      - name: Send email notification
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: HCX SDK Release ${{ needs.prepare-release.outputs.version }}
+          body: |
+            Release ${{ needs.prepare-release.outputs.version }} has been published.
+            
+            SDK: ${{ needs.prepare-release.outputs.sdk }}
+            Status: ${{ job.status }}
+            
+            View release: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}
+          to: dev-team@healthflowegy.com
+          from: HCX CI/CD
+        if: always()

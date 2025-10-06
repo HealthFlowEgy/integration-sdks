@@ -1,0 +1,217 @@
+name: Node.js SDK CI/CD
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - sprint-*
+    paths:
+      - 'javascript/**'
+      - '.github/workflows/nodejs-ci.yml'
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'javascript/**'
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: Lint & Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: javascript/package-lock.json
+
+      - name: Install dependencies
+        working-directory: javascript
+        run: npm ci
+
+      - name: Run ESLint
+        working-directory: javascript
+        run: npm run lint --if-present
+
+      - name: Check formatting
+        working-directory: javascript
+        run: npm run format:check --if-present
+
+  test:
+    name: Test (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [16, 18, 20]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+          cache-dependency-path: javascript/package-lock.json
+
+      - name: Install dependencies
+        working-directory: javascript
+        run: npm ci
+
+      - name: Run tests
+        working-directory: javascript
+        run: npm test
+
+      - name: Generate coverage report
+        working-directory: javascript
+        run: npm run test:coverage --if-present
+
+      - name: Upload coverage to Codecov
+        if: matrix.node-version == '18'
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./javascript/coverage/lcov.info
+          flags: nodejs
+          name: nodejs-sdk
+
+  build:
+    name: Build & Validate
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: javascript/package-lock.json
+
+      - name: Install dependencies
+        working-directory: javascript
+        run: npm ci
+
+      - name: Build TypeScript
+        working-directory: javascript
+        run: npm run build --if-present
+
+      - name: Validate package
+        working-directory: javascript
+        run: npm pack --dry-run
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: nodejs-sdk-dist
+          path: javascript/dist/
+          retention-days: 7
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Run npm audit
+        working-directory: javascript
+        run: npm audit --audit-level=moderate
+        continue-on-error: true
+
+      - name: Run Snyk security scan
+        uses: snyk/actions/node@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high --file=javascript/package.json
+
+  publish-npm:
+    name: Publish to NPM
+    runs-on: ubuntu-latest
+    needs: [build, security]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          registry-url: 'https://registry.npmjs.org'
+          cache: 'npm'
+          cache-dependency-path: javascript/package-lock.json
+
+      - name: Install dependencies
+        working-directory: javascript
+        run: npm ci
+
+      - name: Build package
+        working-directory: javascript
+        run: npm run build --if-present
+
+      - name: Publish to NPM
+        working-directory: javascript
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: nodejs-v${{ steps.package-version.outputs.version }}
+          release_name: Node.js SDK v${{ steps.package-version.outputs.version }}
+          draft: false
+          prerelease: false
+
+  publish-github:
+    name: Publish to GitHub Packages
+    runs-on: ubuntu-latest
+    needs: [build, security]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@healthflowegy'
+          cache: 'npm'
+          cache-dependency-path: javascript/package-lock.json
+
+      - name: Install dependencies
+        working-directory: javascript
+        run: npm ci
+
+      - name: Build package
+        working-directory: javascript
+        run: npm run build --if-present
+
+      - name: Publish to GitHub Packages
+        working-directory: javascript
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

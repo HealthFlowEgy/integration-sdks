@@ -1,0 +1,258 @@
+name: Integration Tests
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+  schedule:
+    # Run integration tests daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  setup-mock-server:
+    name: Setup Mock HCX Server
+    runs-on: ubuntu-latest
+    services:
+      mock-hcx:
+        image: mockserver/mockserver:latest
+        ports:
+          - 1080:1080
+        env:
+          MOCKSERVER_INITIALIZATION_JSON_PATH: /config/mock-expectations.json
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Wait for mock server
+        run: |
+          timeout 30 bash -c 'until curl -f http://localhost:1080/health; do sleep 1; done'
+
+      - name: Configure mock expectations
+        run: |
+          curl -X PUT http://localhost:1080/mockserver/expectation \
+            -H 'Content-Type: application/json' \
+            -d @tests/integration/mock-expectations.json
+
+  test-nodejs-integration:
+    name: Node.js Integration Tests
+    runs-on: ubuntu-latest
+    needs: setup-mock-server
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: javascript/package-lock.json
+
+      - name: Install dependencies
+        working-directory: javascript
+        run: npm ci
+
+      - name: Run integration tests
+        working-directory: javascript
+        env:
+          HCX_MOCK_SERVER_URL: http://localhost:1080
+        run: npm run test:integration --if-present
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: nodejs-integration-results
+          path: javascript/test-results/
+          retention-days: 30
+
+  test-java-integration:
+    name: Java Integration Tests
+    runs-on: ubuntu-latest
+    needs: setup-mock-server
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 11
+        uses: actions/setup-java@v3
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Run integration tests
+        working-directory: java/hcx-integrator-sdk
+        env:
+          HCX_MOCK_SERVER_URL: http://localhost:1080
+        run: mvn verify -P integration-tests
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: java-integration-results
+          path: java/hcx-integrator-sdk/target/failsafe-reports/
+          retention-days: 30
+
+  test-python-integration:
+    name: Python Integration Tests
+    runs-on: ubuntu-latest
+    needs: setup-mock-server
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        working-directory: python/hcx-integrator
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pytest pytest-asyncio
+
+      - name: Run integration tests
+        working-directory: python/hcx-integrator
+        env:
+          HCX_MOCK_SERVER_URL: http://localhost:1080
+        run: pytest tests/integration/
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: python-integration-results
+          path: python/hcx-integrator/test-results/
+          retention-days: 30
+
+  test-dotnet-integration:
+    name: .NET Integration Tests
+    runs-on: ubuntu-latest
+    needs: setup-mock-server
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: '7.0.x'
+
+      - name: Restore dependencies
+        working-directory: dot-net
+        run: dotnet restore
+
+      - name: Run integration tests
+        working-directory: dot-net
+        env:
+          HCX_MOCK_SERVER_URL: http://localhost:1080
+        run: dotnet test --filter Category=Integration --logger "trx;LogFileName=integration-results.trx"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: dotnet-integration-results
+          path: dot-net/**/TestResults/
+          retention-days: 30
+
+  cross-sdk-compatibility:
+    name: Cross-SDK Compatibility Tests
+    runs-on: ubuntu-latest
+    needs: [test-nodejs-integration, test-java-integration, test-python-integration, test-dotnet-integration]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup multi-language environment
+        run: |
+          # Setup Node.js
+          curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+          sudo apt-get install -y nodejs
+          
+          # Setup Python
+          sudo apt-get install -y python3.11 python3-pip
+          
+          # Setup Java
+          sudo apt-get install -y openjdk-11-jdk
+          
+          # Setup .NET
+          wget https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
+          sudo dpkg -i packages-microsoft-prod.deb
+          sudo apt-get update
+          sudo apt-get install -y dotnet-sdk-7.0
+
+      - name: Run cross-SDK compatibility tests
+        run: |
+          cd tests/integration/cross-sdk
+          ./run-compatibility-tests.sh
+
+      - name: Upload compatibility report
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: cross-sdk-compatibility-report
+          path: tests/integration/cross-sdk/report.html
+          retention-days: 30
+
+  performance-tests:
+    name: Performance & Load Tests
+    runs-on: ubuntu-latest
+    needs: setup-mock-server
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install k6
+
+      - name: Run performance tests
+        run: |
+          cd tests/performance
+          k6 run --out json=results.json load-test.js
+
+      - name: Upload performance results
+        uses: actions/upload-artifact@v3
+        with:
+          name: performance-results
+          path: tests/performance/results.json
+          retention-days: 30
+
+      - name: Performance regression check
+        run: |
+          cd tests/performance
+          node check-regression.js results.json
+
+  notify-results:
+    name: Notify Test Results
+    runs-on: ubuntu-latest
+    needs: [test-nodejs-integration, test-java-integration, test-python-integration, test-dotnet-integration, cross-sdk-compatibility, performance-tests]
+    if: always()
+    steps:
+      - name: Send Slack notification
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          text: 'Integration tests completed'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+        if: always()

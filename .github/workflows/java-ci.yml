@@ -1,0 +1,217 @@
+name: Java SDK CI/CD
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - sprint-*
+    paths:
+      - 'java/**'
+      - '.github/workflows/java-ci.yml'
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'java/**'
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: Lint & Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup JDK 11
+        uses: actions/setup-java@v3
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Check code style
+        working-directory: java/hcx-integrator-sdk
+        run: mvn checkstyle:check
+        continue-on-error: true
+
+      - name: Run SpotBugs
+        working-directory: java/hcx-integrator-sdk
+        run: mvn spotbugs:check
+        continue-on-error: true
+
+  test:
+    name: Test (Java ${{ matrix.java-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        java-version: ['11', '17', '21']
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup JDK ${{ matrix.java-version }}
+        uses: actions/setup-java@v3
+        with:
+          java-version: ${{ matrix.java-version }}
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Run tests
+        working-directory: java/hcx-integrator-sdk
+        run: mvn clean test
+
+      - name: Generate coverage report
+        if: matrix.java-version == '11'
+        working-directory: java/hcx-integrator-sdk
+        run: mvn jacoco:report
+
+      - name: Upload coverage to Codecov
+        if: matrix.java-version == '11'
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./java/hcx-integrator-sdk/target/site/jacoco/jacoco.xml
+          flags: java
+          name: java-sdk
+
+  build:
+    name: Build & Analyze
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup JDK 11
+        uses: actions/setup-java@v3
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Cache SonarCloud packages
+        uses: actions/cache@v3
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-sonar
+          restore-keys: ${{ runner.os }}-sonar
+
+      - name: Build and analyze
+        working-directory: java/hcx-integrator-sdk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: mvn -B verify org.sonarsource.scanner.maven:sonar-maven-plugin:sonar -Dsonar.projectKey=HealthFlowEgy_integration-sdks-java -Dsonar.organization=healthflowegy
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: java-sdk-jar
+          path: java/hcx-integrator-sdk/target/*.jar
+          retention-days: 7
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 11
+        uses: actions/setup-java@v3
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Run OWASP Dependency Check
+        working-directory: java/hcx-integrator-sdk
+        run: mvn org.owasp:dependency-check-maven:check
+        continue-on-error: true
+
+      - name: Run Snyk security scan
+        uses: snyk/actions/maven@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high --file=java/hcx-integrator-sdk/pom.xml
+
+      - name: Upload security reports
+        uses: actions/upload-artifact@v3
+        with:
+          name: java-security-reports
+          path: java/hcx-integrator-sdk/target/dependency-check-report.html
+          retention-days: 30
+
+  publish-maven-central:
+    name: Publish to Maven Central
+    runs-on: ubuntu-latest
+    needs: [build, security]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 11
+        uses: actions/setup-java@v3
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+          cache: 'maven'
+          server-id: ossrh
+          server-username: MAVEN_USERNAME
+          server-password: MAVEN_PASSWORD
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase: MAVEN_GPG_PASSPHRASE
+
+      - name: Build and deploy to Maven Central
+        working-directory: java/hcx-integrator-sdk
+        env:
+          MAVEN_USERNAME: ${{ secrets.OSSRH_USERNAME }}
+          MAVEN_PASSWORD: ${{ secrets.OSSRH_TOKEN }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: mvn -B clean deploy -P release
+
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: java-v${{ steps.package-version.outputs.version }}
+          release_name: Java SDK v${{ steps.package-version.outputs.version }}
+          draft: false
+          prerelease: false
+
+  publish-github-packages:
+    name: Publish to GitHub Packages
+    runs-on: ubuntu-latest
+    needs: [build, security]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 11
+        uses: actions/setup-java@v3
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Publish to GitHub Packages
+        working-directory: java/hcx-integrator-sdk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: mvn -B deploy -DaltDeploymentRepository=github::default::https://maven.pkg.github.com/HealthFlowEgy/integration-sdks

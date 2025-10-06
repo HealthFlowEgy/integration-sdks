@@ -1,0 +1,100 @@
+version: 2
+updates:
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "chore(deps)"
+
+  # Node.js/JavaScript SDK
+  - package-ecosystem: "npm"
+    directory: "/javascript"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "javascript"
+      - "nodejs"
+    commit-message:
+      prefix: "chore(deps)"
+    versioning-strategy: increase
+    ignore:
+      # Ignore major version updates for stable dependencies
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  # Java/Maven SDK
+  - package-ecosystem: "maven"
+    directory: "/java/hcx-integrator-sdk"
+    schedule:
+      interval: "weekly"
+      day: "wednesday"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "java"
+      - "maven"
+    commit-message:
+      prefix: "chore(deps)"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  # Python SDK
+  - package-ecosystem: "pip"
+    directory: "/python/hcx-integrator"
+    schedule:
+      interval: "weekly"
+      day: "thursday"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "python"
+    commit-message:
+      prefix: "chore(deps)"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  # .NET SDK - Core
+  - package-ecosystem: "nuget"
+    directory: "/dot-net/hcx-integrator-sdk-Core"
+    schedule:
+      interval: "weekly"
+      day: "friday"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "dotnet"
+      - "nuget"
+    commit-message:
+      prefix: "chore(deps)"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  # .NET SDK - Main
+  - package-ecosystem: "nuget"
+    directory: "/dot-net/hcx-integrator-sdk"
+    schedule:
+      interval: "weekly"
+      day: "friday"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "dotnet"
+      - "nuget"
+    commit-message:
+      prefix: "chore(deps)"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
